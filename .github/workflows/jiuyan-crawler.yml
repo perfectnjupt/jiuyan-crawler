@@ -28,6 +28,9 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: python run.py
+      # 固定入口：最新一期报告复制为 latest.html（本仓库定制新增）
+      - name: Make latest entry
+        run: ls -t data/*.html | head -1 | xargs -I {} cp {} data/latest.html
       - name: 上传报告
         uses: actions/upload-artifact@v4
         with:
