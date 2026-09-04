@@ -83,7 +83,7 @@ class ReportGenerator:
                 lines.append(f"**{i}. {a['title']}**")
                 src = a.get("source", "")
                 kws = ", ".join(a.get("keywords", []))
-                lines.append(f"- 来源: {src} | 关键词: {kws}")
+                lines.append(f"- 发布: {a.get('date', '-')} | 来源: {src} | 关键词: {kws}")
                 lines.append(f"- [查看原文]({a['url']})")
                 lines.append(f"")
 
@@ -104,7 +104,7 @@ class ReportGenerator:
                 lines.append(f"**{i}. {a['title']}**")
                 src = a.get("source", "")
                 kws = ", ".join(a.get("keywords", []))
-                lines.append(f"- 来源: {src} | 关键词: {kws}")
+                lines.append(f"- 发布: {a.get('date', '-')} | 来源: {src} | 关键词: {kws}")
                 lines.append(f"- [查看原文]({a['url']})")
                 lines.append(f"")
 
@@ -219,7 +219,7 @@ class ReportGenerator:
                     <div class="card-num">{i}</div>
                     <div class="card-body">
                         <h3>{esc(a['title'])}</h3>
-                        <div class="card-meta"><span class="src">{esc(a.get('source',''))}</span>{kw_tags}</div>
+                        <div class="card-meta"><span class="src">{esc(a.get('date',''))} · {esc(a.get('source',''))}</span>{kw_tags}</div>
                         <a href="{a['url']}" target="_blank" class="card-link">查看原文 &rarr;</a>
                     </div></div>"""
             return h

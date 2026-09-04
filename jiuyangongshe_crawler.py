@@ -63,6 +63,30 @@ KEYWORDS_US = [
 # 排除关键词
 EXCLUDE_KW = ["广告", "推广", "合作", "代写"]
 
+# 只保留最近 N 天的文章（首页/研究优选含多日前的置顶热帖，不过滤会混进旧闻）
+MAX_AGE_DAYS = 2
+
+_DATE_FULL_RE = re.compile(r'(\d{4})-(\d{1,2})-(\d{1,2})')
+_DATE_REL_RE = re.compile(r'(\d+)\s*天前')
+
+
+def _parse_pub_date(text: str) -> Optional[datetime]:
+    """从卡片文本解析发布日期。支持 YYYY-MM-DD 与 'N天前'；解析不出返回 None（视为无法验证新鲜度）。"""
+    if not text:
+        return None
+    m = _DATE_FULL_RE.search(text)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = _DATE_REL_RE.search(text)
+    if m:
+        return datetime.now() - timedelta(days=int(m.group(1)))
+    if any(k in text for k in ("小时前", "分钟前", "刚刚")):
+        return datetime.now()
+    return None
+
 
 class JiuyanCrawler:
     """韭研公社舆情爬虫"""
@@ -90,11 +114,16 @@ class JiuyanCrawler:
             return "美股"
         return None
 
-    def _add_article(self, title: str, url: str, source: str, content: str = ""):
-        """添加文章（自动去重和分类）"""
+    def _add_article(self, title: str, url: str, source: str, content: str = "", pub_date: Optional[datetime] = None):
+        """添加文章（自动去重、日期过滤和分类）"""
         if url in self.seen_urls:
             return
         if not title or len(title) < 8:
+            return
+        # 新鲜度过滤：解析不到日期或超过 MAX_AGE_DAYS 的旧帖一律丢弃（置顶/热帖常为数日前旧闻）
+        if pub_date is None:
+            return
+        if (datetime.now() - pub_date) > timedelta(days=MAX_AGE_DAYS):
             return
 
         stock_type = self._classify(title + " " + content)
@@ -107,9 +136,41 @@ class JiuyanCrawler:
             "url": url,
             "type": stock_type,
             "source": source,
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": pub_date.strftime("%Y-%m-%d"),
             "keywords": [kw for kw in (KEYWORDS_A if stock_type == "A股" else KEYWORDS_US) if kw in title + content][:5],
         })
+
+    def _extract_cards(self, html_text: str, source: str):
+        """BS4 解析：把每个 /a/ 文章链接与所在卡片的发布日期（fs13-ash）关联后入库。"""
+        if not BeautifulSoup:
+            logger.warning("  BeautifulSoup 未安装，跳过 BS4 解析")
+            return
+        soup = BeautifulSoup(html_text, 'html.parser')
+        added = dropped_old = dropped_nodate = 0
+        for a in soup.find_all('a', href=re.compile(r'^/a/')):
+            title = a.get_text(strip=True)
+            node, pub, card_text = a, None, ""
+            for _ in range(6):          # 向上最多6层找卡片容器（含 fs13-ash 日期）
+                node = node.parent
+                if node is None:
+                    break
+                d = node.find(class_='fs13-ash')
+                if d:
+                    pub = _parse_pub_date(d.get_text(' ', strip=True))
+                    if pub:
+                        card_text = node.get_text(' ', strip=True)[:300]
+                        break
+            if not title:
+                title = card_text[:60]
+            before = len(self.all_articles)
+            self._add_article(title, BASE_URL + a['href'], source, content=card_text, pub_date=pub)
+            if len(self.all_articles) > before:
+                added += 1
+            elif pub is None:
+                dropped_nodate += 1
+            elif (datetime.now() - pub) > timedelta(days=MAX_AGE_DAYS):
+                dropped_old += 1
+        logger.info(f"  [{source}] 入库 {added}，过滤旧帖(>{MAX_AGE_DAYS}天) {dropped_old}，无日期丢弃 {dropped_nodate}")
 
     # --------------------------------------------------------
     # 策略1: HTML正则提取（首页/研究优选/热门）
@@ -128,17 +189,7 @@ class JiuyanCrawler:
                 resp = self.session.get(url, timeout=15)
                 resp.raise_for_status()
                 resp.encoding = 'utf-8'
-
-                pattern = r'<a[^>]+href="(/a/[^"]+)"[^>]*>([^<]{8,})</a>'
-                matches = re.findall(pattern, resp.text)
-
-                count = 0
-                for href, title in matches:
-                    title = title.strip()
-                    self._add_article(title, BASE_URL + href, name)
-                    count += 1
-                logger.info(f"  找到 {len(matches)} 个链接, 匹配 {count} 篇相关文章")
-
+                self._extract_cards(resp.text, name)
             except Exception as e:
                 logger.error(f"  失败: {e}")
 
@@ -153,37 +204,7 @@ class JiuyanCrawler:
             resp = self.session.get(f"{BASE_URL}/action", timeout=15)
             resp.raise_for_status()
             resp.encoding = 'utf-8'
-
-            links = re.findall(r'href="(/a/[^"]+)"', resp.text)
-            logger.info(f"  异动页面找到 {len(links)} 个链接")
-
-            for link in links:
-                pattern = rf'([^<]{{10,80}})</a[^>]*href="{re.escape(link)}"'
-                pattern2 = rf'href="{re.escape(link)}"[^>]*>[^<]*<[^>]*>([^<]{{10,100}})'
-
-                match = re.search(pattern, resp.text)
-                match2 = re.search(pattern2, resp.text)
-                title = ""
-                if match:
-                    title = match.group(1).strip()
-                elif match2:
-                    title = match2.group(1).strip()
-
-                self._add_article(title or f"异动分析-{link.split('/')[-1]}", BASE_URL + link, "异动")
-
-            if BeautifulSoup:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                items = soup.select('.item-content')
-                if items:
-                    logger.info(f"  通过BS4找到 {len(items)} 个item-content")
-                    for item in items:
-                        a_tag = item.find('a', href=re.compile(r'/a/'))
-                        if a_tag:
-                            text = item.get_text(separator=' ', strip=True)[:200]
-                            href = a_tag.get('href', '')
-                            if href.startswith('/a/'):
-                                self._add_article(text, BASE_URL + href, "异动")
-
+            self._extract_cards(resp.text, "异动")
         except Exception as e:
             logger.error(f"  异动页面失败: {e}")
 
